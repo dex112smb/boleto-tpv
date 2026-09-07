@@ -22,9 +22,43 @@ public class MainActivity extends Activity {
   TextView status,total,change; SharedPreferences prefs; AtomicBoolean printing=new AtomicBoolean(false);
   List<Button> tickets=new ArrayList<>(); double[] prices={5,10,15,20,25,30}; int qty=0; double price=0,received=0;
   final UUID SPP=UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+  static final int REQ_BT=7;
   DecimalFormat money=new DecimalFormat("0.00");
 
-  public void onCreate(Bundle b){super.onCreate(b);prefs=getSharedPreferences("tpv",0);loadPrices(); BluetoothManager m=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);adapter=m.getAdapter(); if(Build.VERSION.SDK_INT>=31&&checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},7);setContentView(ui());}
+  public void onCreate(Bundle b){
+    super.onCreate(b);
+    prefs=getSharedPreferences("tpv",0);
+    loadPrices();
+    BluetoothManager m=(BluetoothManager)getSystemService(BLUETOOTH_SERVICE);
+    adapter=m.getAdapter();
+    setContentView(ui());
+    ensureBluetoothPermission(false);
+  }
+
+  boolean hasBluetoothPermission(){
+    return Build.VERSION.SDK_INT<31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED;
+  }
+
+  boolean ensureBluetoothPermission(boolean showMessage){
+    if(hasBluetoothPermission()) return true;
+    if(Build.VERSION.SDK_INT>=31){
+      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},REQ_BT);
+      if(showMessage) toast("Autoriza 'Dispositivos cercanos' para conectar la impresora");
+    }
+    return false;
+  }
+
+  @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] grantResults){
+    super.onRequestPermissionsResult(requestCode,permissions,grantResults);
+    if(requestCode==REQ_BT){
+      if(grantResults.length>0 && grantResults[0]==PackageManager.PERMISSION_GRANTED){
+        toast("Permiso Bluetooth concedido");
+      }else{
+        toast("Falta permiso de dispositivos cercanos. Actívalo en Ajustes > Apps > Boleto TPV > Permisos");
+      }
+    }
+  }
+
   View ui(){LinearLayout r=new LinearLayout(this);r.setOrientation(LinearLayout.VERTICAL);r.setPadding(dp(14),dp(12),dp(14),dp(12));r.setBackgroundColor(Color.rgb(7,10,18));
     LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.CENTER_VERTICAL);TextView title=txt("BOLETO TPV",28,true,Color.WHITE);top.addView(title,new LinearLayout.LayoutParams(0,dp(56),1));status=txt("Impresora: no conectada",15,true,Color.rgb(255,100,110));top.addView(status);Button con=btn("CONECTAR IMPRESORA",Color.rgb(20,120,220));LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(dp(230),dp(52));cp.setMargins(dp(12),0,0,0);top.addView(con,cp);con.setOnClickListener(v->choose());r.addView(top);
     LinearLayout body=new LinearLayout(this);LinearLayout.LayoutParams bp=new LinearLayout.LayoutParams(-1,0,1);bp.topMargin=dp(10);r.addView(body,bp);GridLayout g=new GridLayout(this);g.setColumnCount(3);g.setRowCount(2);body.addView(g,new LinearLayout.LayoutParams(0,-1,2.1f));
@@ -34,15 +68,47 @@ public class MainActivity extends Activity {
   void select(int i,Button b){if(printing.get())return;qty=i+1;price=prices[i];received=0;for(Button x:tickets)x.setAlpha(.72f);b.setAlpha(1);update();}
   void update(){total.setText(euro(price));change.setText(euro(Math.max(0,received-price)));}
   String euro(double n){return money.format(n).replace('.',',')+" €";}
-  void choose(){if(adapter==null){toast("Este dispositivo no tiene Bluetooth");return;}if(!adapter.isEnabled()){startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));return;}if(Build.VERSION.SDK_INT>=31&&checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT},7);return;}Set<BluetoothDevice> set=adapter.getBondedDevices();if(set.isEmpty()){toast("Empareja la impresora primero en Bluetooth");return;}List<BluetoothDevice> ds=new ArrayList<>(set);String[] ns=new String[ds.size()];for(int i=0;i<ds.size();i++)ns[i]=name(ds.get(i))+"\n"+ds.get(i).getAddress();new AlertDialog.Builder(this).setTitle("Selecciona la impresora").setItems(ns,(d,w)->connect(ds.get(w))).setNegativeButton("Cancelar",null).show();}
-  void connect(BluetoothDevice d){status.setText("Conectando a "+name(d)+"…");status.setTextColor(Color.rgb(255,185,70));new Thread(()->{try{closePrinter();adapter.cancelDiscovery();BluetoothSocket x=d.createInsecureRfcommSocketToServiceRecord(SPP);x.connect();socket=x;out=x.getOutputStream();device=d;runOnUiThread(()->{status.setText("● "+name(d));status.setTextColor(Color.rgb(55,215,130));toast("Impresora conectada");});}catch(Exception e){closePrinter();runOnUiThread(()->{status.setText("No se pudo conectar");status.setTextColor(Color.rgb(255,100,110));toast("Error Bluetooth: "+e.getMessage());});}}).start();}
+
+  void choose(){
+    if(adapter==null){toast("Este dispositivo no tiene Bluetooth");return;}
+    if(!ensureBluetoothPermission(true)) return;
+    if(!adapter.isEnabled()){startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));return;}
+    try{
+      Set<BluetoothDevice> set=adapter.getBondedDevices();
+      if(set.isEmpty()){toast("Empareja la impresora primero en Bluetooth");return;}
+      List<BluetoothDevice> ds=new ArrayList<>(set);String[] ns=new String[ds.size()];
+      for(int i=0;i<ds.size();i++)ns[i]=name(ds.get(i))+"\n"+ds.get(i).getAddress();
+      new AlertDialog.Builder(this).setTitle("Selecciona la impresora").setItems(ns,(d,w)->connect(ds.get(w))).setNegativeButton("Cancelar",null).show();
+    }catch(SecurityException e){
+      ensureBluetoothPermission(true);
+    }
+  }
+
+  void connect(BluetoothDevice d){
+    if(!ensureBluetoothPermission(true)) return;
+    status.setText("Conectando a "+name(d)+"…");status.setTextColor(Color.rgb(255,185,70));
+    new Thread(()->{
+      try{
+        // No llamamos cancelDiscovery(): en Android 12+ requeriría BLUETOOTH_SCAN y no es necesario para un dispositivo ya emparejado.
+        BluetoothSocket x=d.createInsecureRfcommSocketToServiceRecord(SPP);
+        x.connect();socket=x;out=x.getOutputStream();device=d;
+        runOnUiThread(()->{status.setText("● "+name(d));status.setTextColor(Color.rgb(55,215,130));toast("Impresora conectada");});
+      }catch(SecurityException e){
+        closePrinter();
+        runOnUiThread(()->{status.setText("Falta permiso Bluetooth");status.setTextColor(Color.rgb(255,100,110));toast("Activa 'Dispositivos cercanos' en los permisos de Boleto TPV");});
+      }catch(Exception e){
+        closePrinter();runOnUiThread(()->{status.setText("No se pudo conectar");status.setTextColor(Color.rgb(255,100,110));toast("Error Bluetooth: "+e.getMessage());});
+      }
+    }).start();
+  }
+
   void test(){if(!ready()){toast("Conecta la impresora primero");return;}if(!printing.compareAndSet(false,true))return;enable(false);new Thread(()->{try{ByteArrayOutputStream b=new ByteArrayOutputStream();b.write(new byte[]{0x1B,0x40});b.write(new byte[]{0x1B,0x61,1});text(b,"PRUEBA BOLETO TPV\nBluetooth OK\nImpresora: "+name(device)+"\n\n\n");b.write(new byte[]{0x1D,0x56,0});out.write(b.toByteArray());out.flush();runOnUiThread(()->toast("Prueba enviada"));}catch(Exception e){error(e);}finally{printing.set(false);runOnUiThread(()->enable(true));}}).start();}
   void printSale(String method){if(qty<1){toast("Selecciona la cantidad de fichas");return;}if(!ready()){toast("Conecta la impresora primero");return;}if(!printing.compareAndSet(false,true)){toast("Ya hay una impresión en curso");return;}final int q=qty;final double p=price;enable(false);new Thread(()->{try{for(int i=1;i<=q;i++){out.write(ticket(i,q,p,method));out.flush();Thread.sleep(150);}runOnUiThread(()->{toast("✓ "+q+" ficha(s) impresa(s)");qty=0;price=received=0;for(Button x:tickets)x.setAlpha(1);update();});}catch(Exception e){error(e);}finally{printing.set(false);runOnUiThread(()->enable(true));}}).start();}
   byte[] ticket(int copy,int q,double p,String method)throws Exception{ByteArrayOutputStream b=new ByteArrayOutputStream();b.write(new byte[]{0x1B,0x40});b.write(new byte[]{0x1B,0x61,1});b.write(new byte[]{0x1D,0x21,0x11});text(b,"FICHA\n");b.write(new byte[]{0x1D,0x21,0});text(b,"1 VIAJE\n------------------------------\nOperacion: "+q+" ficha(s)\nImporte: "+money.format(p)+" EUR\nPago: "+method+"\n"+new SimpleDateFormat("dd/MM/yyyy HH:mm:ss",Locale.getDefault()).format(new Date())+"\nFicha "+copy+" de "+q+"\n\nGRACIAS\n\n\n");b.write(new byte[]{0x1D,0x56,0});return b.toByteArray();}
   // Solo impresión ESC/POS y corte. No se envían comandos para escribir/borrar gráficos NV.
   void text(ByteArrayOutputStream b,String s)throws Exception{b.write(s.getBytes(Charset.forName("ISO-8859-1")));}
   void error(Exception e){closePrinter();runOnUiThread(()->{status.setText("Impresora desconectada");status.setTextColor(Color.rgb(255,100,110));toast("Error de impresión: "+e.getMessage());});}
-  boolean ready(){return socket!=null&&socket.isConnected()&&out!=null;} void enable(boolean x){for(Button b:tickets)b.setEnabled(x);} String name(BluetoothDevice d){try{String n=d.getName();return n==null?d.getAddress():n;}catch(Exception e){return "impresora";}}
+  boolean ready(){return socket!=null&&socket.isConnected()&&out!=null;} void enable(boolean x){for(Button b:tickets)b.setEnabled(x);} String name(BluetoothDevice d){try{if(!hasBluetoothPermission())return "impresora";String n=d.getName();return n==null?d.getAddress():n;}catch(Exception e){return "impresora";}}
   void editPrices(){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);final EditText[] f=new EditText[6];for(int i=0;i<6;i++){LinearLayout row=new LinearLayout(this);TextView t=txt((i+1)+" ticket(s)",17,true,Color.DKGRAY);row.addView(t,new LinearLayout.LayoutParams(0,dp(54),1));EditText e=new EditText(this);e.setInputType(8194);e.setText(money.format(prices[i]).replace(',','.'));f[i]=e;row.addView(e,new LinearLayout.LayoutParams(dp(130),dp(54)));box.addView(row);}AlertDialog dlg=new AlertDialog.Builder(this).setTitle("Editar precios").setMessage("Nada cambia hasta que confirmes.").setView(box).setNegativeButton("Cancelar",null).setPositiveButton("Revisar",null).create();dlg.setOnShowListener(x->dlg.getButton(-1).setOnClickListener(v->{double[] n=prices.clone();try{for(int i=0;i<6;i++){n[i]=Double.parseDouble(f[i].getText().toString().replace(',','.'));if(n[i]<0)throw new Exception();}}catch(Exception e){toast("Precio no válido");return;}StringBuilder c=new StringBuilder();for(int i=0;i<6;i++)if(Math.abs(n[i]-prices[i])>.001)c.append(i+1).append(" ticket(s): ").append(euro(prices[i])).append(" → ").append(euro(n[i])).append("\n");if(c.length()==0){toast("No hay cambios");return;}new AlertDialog.Builder(this).setTitle("Confirmar precios").setMessage(c.toString()).setNegativeButton("Cancelar",null).setPositiveButton("APLICAR",(a,z)->{prices=n;savePrices();for(int i=0;i<6;i++)tickets.get(i).setText(ticketText(i));toast("Precios actualizados");dlg.dismiss();}).show();}));dlg.show();}
   void loadPrices(){for(int i=0;i<6;i++)prices[i]=Double.longBitsToDouble(prefs.getLong("p"+i,Double.doubleToLongBits(prices[i])));}void savePrices(){SharedPreferences.Editor e=prefs.edit();for(int i=0;i<6;i++)e.putLong("p"+i,Double.doubleToLongBits(prices[i]));e.apply();}
   String ticketText(int i){return (i+1)+(i==0?" TICKET\n":" TICKETS\n")+euro(prices[i]);}int tile(int i){int[] c={Color.rgb(14,48,79),Color.rgb(32,31,84),Color.rgb(61,27,83),Color.rgb(61,27,83),Color.rgb(74,27,65),Color.rgb(74,49,18)};return c[i];}
